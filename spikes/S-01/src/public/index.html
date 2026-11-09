@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game Aggregator Search</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      background: #121212;
+      color: #eaeaea;
+    }
+    .telemetry-banner {
+      background: #181824;
+      border: 1px solid #2e2e42;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+      color: #a5b4fc;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    input[type="search"] {
+      width: 100%;
+      padding: 0.85rem 1rem;
+      font-size: 1rem;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #1e1e1e;
+      color: #fff;
+      box-sizing: border-box;
+      margin-bottom: 0.5rem;
+    }
+    input[type="search"]:focus {
+      outline: 2px solid #4f46e5;
+      border-color: transparent;
+    }
+    .query-stats {
+      font-size: 0.82rem;
+      color: #888;
+      margin-bottom: 1.25rem;
+      font-family: monospace;
+    }
+    .game-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .game-card {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem;
+      background: #1e1e1e;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      text-decoration: none;
+      color: inherit;
+    }
+    .game-card:hover {
+      border-color: #555;
+    }
+    .thumb {
+      width: 96px;
+      height: 54px;
+      object-fit: cover;
+      border-radius: 4px;
+      background: #2a2a2a;
+      flex-shrink: 0;
+    }
+    .info {
+      flex: 1;
+    }
+    .title {
+      font-weight: 600;
+      margin: 0 0 0.25rem;
+    }
+    .meta {
+      font-size: 0.85rem;
+      color: #aaa;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .badge {
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      background: #333;
+      color: #fff;
+    }
+    .badge.steam { background: #1b2838; }
+    .badge.itch { background: #fa5c5c; }
+    .badge.roblox { background: #00a2ff; }
+  </style>
+</head>
+<body>
+
+  <h1>Game Search</h1>
+
+  <div id="syncTelemetry" class="telemetry-banner">Loading database ingestion metrics...</div>
+
+  <input
+    type="search"
+    id="searchInput"
+    placeholder="Search games across Steam, Itch.io, and Roblox..."
+    autocomplete="off"
+  />
+  <div id="queryStats" class="query-stats">Waiting for query...</div>
+
+  <div id="resultsContainer" class="game-list"></div>
+
+  <script>
+    const searchInput = document.getElementById('searchInput');
+    const resultsContainer = document.getElementById('resultsContainer');
+    const queryStats = document.getElementById('queryStats');
+    const syncTelemetry = document.getElementById('syncTelemetry');
+    let debounceTimer;
+
+    async function loadSyncTelemetry() {
+      try {
+        const res = await fetch('/api/metrics');
+        const data = await res.json();
+        if (data.latestSyncs && data.latestSyncs.length > 0) {
+          // Take the latest 3 platform runs
+          const recent = data.latestSyncs.slice(0, 3);
+          const summary = recent
+            .map(s => `${s.platform.toUpperCase()}: ${s.total_ms}ms (fetch: ${s.fetch_ms}ms, db: ${s.db_write_ms}ms)`)
+            .join(' • ');
+          syncTelemetry.textContent = `Last DB Sync — ${summary}`;
+        } else {
+          syncTelemetry.textContent = 'No sync logs recorded yet.';
+        }
+      } catch (_) {
+        syncTelemetry.textContent = 'Could not fetch sync telemetry.';
+      }
+    }
+
+    async function fetchGames(query = '') {
+      try {
+        const clientStart = performance.now();
+        const res = await fetch(`/api/games/search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        const roundTripMs = (performance.now() - clientStart).toFixed(2);
+
+        queryStats.textContent = `Found ${data.count} results | SQLite query: ${data.execution_ms} ms | HTTP round-trip: ${roundTripMs} ms`;
+        renderGames(data.results || []);
+      } catch (err) {
+        resultsContainer.innerHTML = '<p>Error loading games.</p>';
+      }
+    }
+
+    function renderGames(games) {
+      if (games.length === 0) {
+        resultsContainer.innerHTML = '<p>No matching games found.</p>';
+        return;
+      }
+
+      resultsContainer.innerHTML = games.map((game) => {
+        let statsText = 'No review data';
+        if (game.platform === 'steam' && game.review_summary) {
+          statsText = `${game.review_summary} (${game.review_score}% of ${game.total_reviews} reviews)`;
+        } else if (game.platform === 'itch' && game.review_summary) {
+          statsText = `${game.review_summary} (${game.total_reviews || 0} ratings)`;
+        } else if (game.platform === 'roblox' && game.active_players !== null) {
+          statsText = `${Number(game.active_players).toLocaleString()} active players`;
+        }
+
+        return `
+          <a class="game-card" href="${game.url}" target="_blank" rel="noopener">
+            <img class="thumb" src="${game.thumbnail_url || ''}" alt="" />
+            <div class="info">
+              <div class="title">${escapeHtml(game.title)}</div>
+              <div class="meta">
+                <span class="badge ${game.platform}">${game.platform}</span>
+                <span>${escapeHtml(statsText)}</span>
+              </div>
+            </div>
+          </a>
+        `;
+      }).join('');
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[char]));
+    }
+
+    searchInput.addEventListener('input', (e) => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchGames(e.target.value);
+      }, 200);
+    });
+
+    loadSyncTelemetry();
+    fetchGames();
+  </script>
+</body>
+</html>
